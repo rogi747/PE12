@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+    <!-- Ép tải nhánh twelve-plus cho thiết bị -->
+    <project name="PixelExperience-Devices/device_samsung_starlte" path="device/samsung/starlte" remote="github" revision="twelve-plus" />
+    <project name="PixelExperience-Devices/device_samsung_exynos9810-common" path="device/samsung/exynos9810-common" remote="github" revision="twelve-plus" />
+    <project name="PixelExperience-Devices/vendor_samsung_starlte" path="vendor/samsung/starlte" remote="github" revision="twelve-plus" />
+    <project name="PixelExperience-Devices/kernel_samsung_exynos9810" path="kernel/samsung/exynos9810" remote="github" revision="twelve-plus" />
+</manifest>
