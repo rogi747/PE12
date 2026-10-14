@@ -57,9 +57,9 @@ jobs:
       NINJA_HIGHMEM_NUM_JOBS: "1"
 
       DISK_WARN_GIB: "15"
-      DISK_STOP_GIB: "7"
+      DISK_STOP_GIB: "1"
       BTRFS_WORKSPACE_IMAGE_GIB: "220"
-      FULL_ROM_SOFT_DEADLINE_MINUTES: "320"
+      FULL_ROM_SOFT_DEADLINE_MINUTES: "360"
 
     steps:
       - name: Reclaim root disk & Setup Swap
@@ -273,7 +273,7 @@ jobs:
 
       - name: Configure PixelExperience and build full star2lte ROM
         working-directory: /home/runner/work/pe
-        timeout-minutes: 325
+        timeout-minutes: 335
         shell: bash
         run: |
           set -eo pipefail
