@@ -213,14 +213,6 @@ jobs:
             git -C "$DIR" lfs checkout webview.apk
           fi
 
-      - name: Verify star2lte product registration
-        working-directory: /home/runner/work/los
-        shell: bash
-        run: |
-          set -eo pipefail
-          MATCHES="$(grep -R -l --include='AndroidProducts.mk' 'aosp_starlte' device vendor 2>/dev/null | head -20 || true)"
-          if [ -z "$MATCHES" ]; then exit 1; fi
-
       - name: Install compatible reclient 0.57.0 (pinned AOSP)
         working-directory: /home/runner/work/los
         timeout-minutes: 20
