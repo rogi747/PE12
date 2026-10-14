@@ -181,7 +181,7 @@ jobs:
           mkdir -p /home/runner/work/los
           cd /home/runner/work/los
 
-          repo init --depth=1 --git-lfs -u https://github.com/zebraoffersp/manifest -b twelve-plus
+          repo init --depth=1 --git-lfs -u https://github.com/PE12-Legacy/manifest -b twelve-plus
 
       - name: Repo sync
         working-directory: /home/runner/work/los
