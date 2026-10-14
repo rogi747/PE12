@@ -1,4 +1,4 @@
-name: PE12 Full / Compressed Workspace Btrfs
+name: PixelExperience 12 - star2lte Full ROM / Compressed Workspace Btrfs
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: los18-star2lte-rbe-full-rom-trial
+  group: pe12-star2lte-rbe-full-rom-trial
   cancel-in-progress: true
 
 jobs:
@@ -47,7 +47,6 @@ jobs:
       RBE_use_application_default_credentials: "false"
       RBE_use_rpc_credentials: "false"
 
-      # Cắt giảm Log RBE để tránh tràn đĩa
       RBE_log_dir: "/tmp/rbe-test"
       RBE_log_path: "text:///tmp/rbe-test/reproxy_log.txt"
       RBE_proxy_log_dir: ""
@@ -93,7 +92,7 @@ jobs:
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
 
-          mkdir -p /home/runner/work/los /tmp/rbe-test
+          mkdir -p /home/runner/work/pe /tmp/rbe-test
           date +%s > /tmp/rbe-test/job-start-epoch.txt
 
           echo "=== DISK ==="
@@ -127,7 +126,7 @@ jobs:
             git-lfs gnupg gperf imagemagick lib32readline-dev lib32z1-dev \
             libelf-dev liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
             lzop pngcrush rsync schedtool squashfs-tools btrfs-progs xsltproc \
-            zip zlib1g-dev python3 python-is-python3 openjdk-21-jdk-headless \
+            zip zlib1g-dev python3 python-is-python3 openjdk-11-jdk-headless \
             ninja-build nginx ca-certificates openssl unzip
 
           mkdir -p "$HOME/bin"
@@ -135,7 +134,7 @@ jobs:
           chmod a+x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Install legacy ncurses5 for Android 11 RenderScript
+      - name: Install legacy ncurses5 for Android 11/12 RenderScript
         shell: bash
         run: |
           set -euo pipefail
@@ -157,8 +156,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          WORKSPACE=/home/runner/work/los
-          BACKING=/tmp/lineage-workspace-btrfs.img
+          WORKSPACE=/home/runner/work/pe
+          BACKING=/tmp/pe-workspace-btrfs.img
           mkdir -p /tmp/rbe-test "$WORKSPACE"
           truncate -s "${BTRFS_WORKSPACE_IMAGE_GIB}G" "$BACKING"
           sudo mkfs.btrfs -f -m single -d single "$BACKING" > /tmp/rbe-test/workspace-btrfs-setup.log 2>&1
@@ -168,7 +167,7 @@ jobs:
             > /tmp/rbe-test/btrfs-storage-samples.tsv
 
       - name: Repo init and install local manifest
-        working-directory: /home/runner/work
+        working-directory: /home/runner/work/pe
         shell: bash
         run: |
           set -e
@@ -178,20 +177,23 @@ jobs:
           git lfs version
           git lfs install --skip-repo
 
-          mkdir -p /home/runner/work/los
-          cd /home/runner/work/los
+          mkdir -p /home/runner/work/pe
+          cd /home/runner/work/pe
 
+          # Đổi sang manifest của PixelExperience 12
           repo init --depth=1 --git-lfs -u https://github.com/PE12-Legacy/manifest -b twelve-plus
+          mkdir -p .repo/local_manifests
+          cp "$GITHUB_WORKSPACE/repo-config/.repo-local-manifests/star2lte.xml" ".repo/local_manifests/star2lte.xml"
 
       - name: Repo sync
-        working-directory: /home/runner/work/los
+        working-directory: /home/runner/work/pe
         timeout-minutes: 120
         shell: bash
         run: |
           set -eo pipefail
           (
             while true; do
-              df -h / /home/runner/work/los | tail -2
+              df -h / /home/runner/work/pe | tail -2
               sleep 30
             done
           ) &
@@ -201,20 +203,20 @@ jobs:
           repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)" || \
           repo sync -c --no-clone-bundle --no-tags --prune -j4
 
-      - name: Fetch and validate WebView arm64 Git LFS APK
-        working-directory: /home/runner/work/los
-        timeout-minutes: 15
+      - name: Verify star2lte product registration
+        working-directory: /home/runner/work/pe
         shell: bash
         run: |
-          set -euo pipefail
-          DIR=external/chromium-webview/prebuilt/arm64
-          if [ -d "$DIR" ]; then
-            git -C "$DIR" lfs pull --include='webview.apk' --exclude=''
-            git -C "$DIR" lfs checkout webview.apk
+          set -eo pipefail
+          # PixelExperience thường dùng aosp_ thay vì lineage_
+          MATCHES="$(grep -R -l --include='AndroidProducts.mk' 'aosp_starlte' device vendor 2>/dev/null | head -20 || true)"
+          if [ -z "$MATCHES" ]; then 
+            echo "Cảnh báo: Không tìm thấy khai báo aosp_starlte trong AndroidProducts.mk!"
+            # exit 1 (Nếu cần thiết có thể bật chặn tại đây)
           fi
 
       - name: Install compatible reclient 0.57.0 (pinned AOSP)
-        working-directory: /home/runner/work/los
+        working-directory: /home/runner/work/pe
         timeout-minutes: 20
         shell: bash
         run: |
@@ -234,7 +236,7 @@ jobs:
           echo "RBE_DIR=$DEST" >> "$GITHUB_ENV"
 
       - name: Start authenticated BuildBuddy gRPC bridge
-        working-directory: /home/runner/work/los
+        working-directory: /home/runner/work/pe
         shell: bash
         run: |
           set -euo pipefail
@@ -269,21 +271,20 @@ jobs:
           nginx -c "$BRIDGE_DIR/nginx.conf"
           sleep 2
 
-      - name: Configure Lineage and build full star2lte ROM via BuildBuddy
-        working-directory: /home/runner/work/los
+      - name: Configure PixelExperience and build full star2lte ROM
+        working-directory: /home/runner/work/pe
         timeout-minutes: 325
         shell: bash
         run: |
           set -eo pipefail
           mkdir -p /tmp/rbe-test
 
-          # Hàm In thông tin tài nguyên hệ thống
           log_resources() {
             echo "========================================================"
             echo " TÀI NGUYÊN HỆ THỐNG: $1 ($(date -u +'%H:%M:%S UTC'))"
             echo "========================================================"
             echo "[DISK]"
-            df -h / /home/runner/work/los 2>/dev/null || true
+            df -h / /home/runner/work/pe 2>/dev/null || true
             echo "[RAM & SWAP]"
             free -h || true
             swapon --show || true
@@ -293,6 +294,7 @@ jobs:
           log_resources "Khởi tạo môi trường (Envsetup & Lunch)"
 
           source build/envsetup.sh
+          # PixelExperience sử dụng aosp_starlte
           lunch aosp_starlte-userdebug
 
           if [ -x "$PWD/prebuilts/jdk/jdk11/linux-x86/bin/java" ]; then
@@ -313,14 +315,12 @@ jobs:
             if (( available < DISK_STOP_GIB * 1024 * 1024 * 1024 )); then exit 1; fi
           }
 
-          # Bổ sung prebuilt kernel bị thiếu cho microdroid
           if [ ! -d "kernel/prebuilts/common-modules/virtual-device/5.10/arm64" ]; then
             echo "=== CLONING MISSING MICRODROID PREBUILTS ==="
             git clone https://android.googlesource.com/kernel/prebuilts/common-modules/virtual-device/5.10/arm64 \
               kernel/prebuilts/common-modules/virtual-device/5.10/arm64 --depth=1
           fi
 
-          # Sửa lỗi RBE scandeps do thiếu tệp CFI của Clang 12
           echo "=== FIX RBE CLANG SCAN BUG ==="
           MISSING_CFI_DIR="prebuilts/clang/host/linux-x86/clang-r416183b1/lib64/clang/12.0.7/share"
           mkdir -p "$MISSING_CFI_DIR"
@@ -338,18 +338,17 @@ jobs:
           BUILD_NINJA="$(find "$ANDROID_BUILD_TOP/out" -maxdepth 1 -name 'combined*.ninja' | head -1)"
           echo "BUILD_NINJA=$BUILD_NINJA" > /tmp/rbe-test/build-ninja.txt
 
-          echo "=== XÓA THƯ MỤC .repo ĐỂ GIẢI PHÓNG ĐĨA CHO PHA ĐÓNG GÓI 99% ==="
-          # Giả mạo công cụ repo để bypass lỗi tạo build-manifest.xml
-          rm -f /home/runner/work/los/.repo/repo/repo || true
-          cat << 'EOF' > /home/runner/work/los/.repo/repo/repo
+          echo "=== XÓA THƯ MỤC .repo ĐỂ GIẢI PHÓNG ĐĨA ==="
+          rm -f /home/runner/work/pe/.repo/repo/repo || true
+          cat << 'EOF' > /home/runner/work/pe/.repo/repo/repo
           #!/usr/bin/env python3
           print('<?xml version="1.0" encoding="UTF-8"?><manifest></manifest>')
           EOF
-          chmod +x /home/runner/work/los/.repo/repo/repo
+          chmod +x /home/runner/work/pe/.repo/repo/repo
 
-          rm -rf /home/runner/work/los/.repo/project-objects || true
-          rm -rf /home/runner/work/los/.repo/projects || true
-          rm -rf /home/runner/work/los/.repo/manifests || true
+          rm -rf /home/runner/work/pe/.repo/project-objects || true
+          rm -rf /home/runner/work/pe/.repo/projects || true
+          rm -rf /home/runner/work/pe/.repo/manifests || true
 
           log_resources "Sau khi dọn dẹp .repo (Chuẩn bị Build ROM)"
 
@@ -366,11 +365,8 @@ jobs:
           fi
           SOFT_DEADLINE_EPOCH=$(( JOB_START_EPOCH + FULL_ROM_SOFT_DEADLINE_MINUTES * 60 ))
 
-          # Tiến trình dọn dẹp chạy ngầm
           (
             while true; do
-              # Xóa thư mục symbols để tiết kiệm đĩa
-              # Xóa các file log reproxy rác để chống phình đĩa
               rm -f /tmp/rbe-test/*.rrpl /tmp/rbe-test/*.INFO* 2>/dev/null || true
               sleep 60
             done
@@ -381,14 +377,12 @@ jobs:
             set +e
             set -o pipefail
             
-            # Tắt Unit Tests ngốn RAM và ép GC dọn rác bộ nhớ
             export SKIP_SOONG_TESTS=true
             export GOGC=45
-            
-            # Tắt PGO để tránh lỗi upload file quá lớn lên BuildBuddy (HTTP 413)
             export ANDROID_PGO_NO_PROFILE_USE=true
             export SKIP_ABI_CHECKS=true
             
+            # PixelExperience có thể build bằng mka bacon hoặc m bacon
             m -j3 bacon 2>&1 | tee "$BUILD_LOG"
             rc=${PIPESTATUS[0]}
             printf '%s\n' "$rc" > "$BUILD_STATUS_FILE"
@@ -447,16 +441,20 @@ jobs:
           fi
 
           ROM_DIR="$ANDROID_BUILD_TOP/out/target/product/starlte"
-          ROM_ZIP="$(find "$ROM_DIR" -maxdepth 1 -type f -name 'lineage-*.zip' | head -1)"
+          ROM_ZIP="$(find "$ROM_DIR" -maxdepth 1 -type f -name 'PixelExperience*.zip' | head -1)"
+          if [ -z "$ROM_ZIP" ]; then 
+            # Fallback nếu tên ZIP khác chuẩn
+            ROM_ZIP="$(find "$ROM_DIR" -maxdepth 1 -type f -name '*.zip' | head -1)"
+          fi
           if [ -z "$ROM_ZIP" ]; then exit 1; fi
           sha256sum "$ROM_ZIP" > /tmp/rbe-test/rom-sha256.txt
 
-      - name: Upload completed LineageOS ROM
+      - name: Upload completed PixelExperience ROM
         if: ${{ success() && inputs.run_mode == 'full_rom' }}
         uses: actions/upload-artifact@v4
         with:
-          name: lineage-19.1-starlte-${{ github.run_id }}
-          path: /home/runner/work/los/out/target/product/starlte/lineage-*.zip
+          name: pe12-starlte-${{ github.run_id }}
+          path: /home/runner/work/pe/out/target/product/starlte/*.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
