@@ -1,0 +1,506 @@
+name: PE12 Full / Compressed Workspace Btrfs
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "Build complete ROM by default; or run compression benchmark"
+        type: choice
+        required: true
+        default: full_rom
+        options:
+          - benchmark
+          - full_rom
+      out_storage:
+        description: "Full workspace (.repo + sources + out): Btrfs ZSTD (default) or plain"
+        type: choice
+        required: true
+        default: btrfs_zstd
+        options:
+          - plain
+          - btrfs_zstd
+
+permissions:
+  contents: read
+
+concurrency:
+  group: los18-star2lte-rbe-full-rom-trial
+  cancel-in-progress: true
+
+jobs:
+  rbe-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      BUILDBUDDY_API_KEY: "${{ secrets.BUILDBUDDY_API_KEY }}"
+      RUN_MODE: "${{ inputs.run_mode }}"
+      OUT_STORAGE: "${{ inputs.out_storage }}"
+
+      USE_RBE: "1"
+      RBE_DIR: "prebuilts/remoteexecution-client/live"
+      RBE_CXX_EXEC_STRATEGY: "remote_local_fallback"
+
+      RBE_service: "127.0.0.1:19099"
+      RBE_service_no_security: "true"
+      RBE_service_no_auth: "true"
+      RBE_use_application_default_credentials: "false"
+      RBE_use_rpc_credentials: "false"
+
+      # Cắt giảm Log RBE để tránh tràn đĩa
+      RBE_log_dir: "/tmp/rbe-test"
+      RBE_log_path: "text:///tmp/rbe-test/reproxy_log.txt"
+      RBE_proxy_log_dir: ""
+      RBE_reproxy_wait_seconds: "30"
+      RBE_v: "0"
+
+      NINJA_REMOTE_NUM_JOBS: "16"
+      NINJA_HIGHMEM_NUM_JOBS: "1"
+
+      DISK_WARN_GIB: "15"
+      DISK_STOP_GIB: "7"
+      BTRFS_WORKSPACE_IMAGE_GIB: "220"
+      FULL_ROM_SOFT_DEADLINE_MINUTES: "320"
+
+    steps:
+      - name: Reclaim root disk & Setup Swap
+        shell: bash
+        run: |
+          set -e
+          
+          # Dọn dẹp ổ cứng vật lý tối đa
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/share/swift \
+            /usr/local/share/powershell \
+            /usr/local/lib/node_modules \
+            /usr/local/graalvm \
+            /usr/share/rust \
+            /usr/share/php* || true
+          sudo docker image prune -a -f >/dev/null 2>&1 || true
+          sudo rm -rf /usr/local/swift /opt/swift /usr/local/share/powershell \
+            /opt/julia /usr/local/julia || true
+
+          # CẤP PHÁT 8GB SWAP ĐỂ CHỐNG LỖI OOM KHI SOONG BUILD
+          echo "=== CẤP PHÁT 8GB SWAP VÀO RAM ==="
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+
+          mkdir -p /home/runner/work/los /tmp/rbe-test
+          date +%s > /tmp/rbe-test/job-start-epoch.txt
+
+          echo "=== DISK ==="
+          df -h /
+          echo "=== MEMORY ==="
+          free -h
+          echo "=== CPU ==="
+          nproc
+
+          TS=/tmp/rbe-test/resource-samples.tsv
+          printf 'timestamp\tstage\tdisk_available_bytes\tdisk_used_bytes\tmem_available_kib\n' > "$TS"
+          printf '%s\tpost-reclaim\t%s\t%s\t%s\n' \
+            "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            "$(df -B1 --output=avail / | tail -n1 | tr -d ' ')" \
+            "$(df -B1 --output=used / | tail -n1 | tr -d ' ')" \
+            "$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)" >> "$TS"
+
+      - name: Checkout local manifest
+        uses: actions/checkout@v4
+        with:
+          path: repo-config
+
+      - name: Install build dependencies
+        working-directory: /home/runner/work
+        shell: bash
+        run: |
+          set -e
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc bison build-essential curl flex g++-multilib gcc-multilib git \
+            git-lfs gnupg gperf imagemagick lib32readline-dev lib32z1-dev \
+            libelf-dev liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
+            lzop pngcrush rsync schedtool squashfs-tools btrfs-progs xsltproc \
+            zip zlib1g-dev python3 python-is-python3 openjdk-21-jdk-headless \
+            ninja-build nginx ca-certificates openssl unzip
+
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Install legacy ncurses5 for Android 11 RenderScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION='6.3-2ubuntu0.3'
+          BASE='https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses'
+          DIR='/tmp/android11-ncurses5'
+          mkdir -p "$DIR" /tmp/rbe-test
+          cd "$DIR"
+
+          curl -fLSs --retry 4 --retry-delay 2 "$BASE/libtinfo5_${VERSION}_amd64.deb" -o "libtinfo5_${VERSION}_amd64.deb"
+          curl -fLSs --retry 4 --retry-delay 2 "$BASE/libncurses5_${VERSION}_amd64.deb" -o "libncurses5_${VERSION}_amd64.deb"
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "./libtinfo5_${VERSION}_amd64.deb" "./libncurses5_${VERSION}_amd64.deb"
+          sudo ldconfig
+
+      - name: Prepare Btrfs ZSTD compressed Android workspace
+        if: ${{ inputs.run_mode == 'full_rom' && inputs.out_storage == 'btrfs_zstd' }}
+        working-directory: /home/runner/work
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKSPACE=/home/runner/work/los
+          BACKING=/tmp/lineage-workspace-btrfs.img
+          mkdir -p /tmp/rbe-test "$WORKSPACE"
+          truncate -s "${BTRFS_WORKSPACE_IMAGE_GIB}G" "$BACKING"
+          sudo mkfs.btrfs -f -m single -d single "$BACKING" > /tmp/rbe-test/workspace-btrfs-setup.log 2>&1
+          sudo mount -t btrfs -o loop,compress=zstd:1,noatime "$BACKING" "$WORKSPACE"
+          sudo chown "$(id -u):$(id -g)" "$WORKSPACE"
+          printf 'timestamp\tstage\troot_available_bytes\troot_used_bytes\tbtrfs_available_bytes\tbtrfs_used_bytes\tbacking_allocated_bytes\tbacking_apparent_bytes\n' \
+            > /tmp/rbe-test/btrfs-storage-samples.tsv
+
+      - name: Repo init and install local manifest
+        working-directory: /home/runner/work
+        shell: bash
+        run: |
+          set -e
+          git config --global user.email "ci@local"
+          git config --global user.name "ci"
+          git config --global color.ui false
+          git lfs version
+          git lfs install --skip-repo
+
+          mkdir -p /home/runner/work/los
+          cd /home/runner/work/los
+
+          repo init --depth=1 --git-lfs -u https://github.com/zebraoffersp/manifest -b twelve-plus
+
+      - name: Repo sync
+        working-directory: /home/runner/work/los
+        timeout-minutes: 120
+        shell: bash
+        run: |
+          set -eo pipefail
+          (
+            while true; do
+              df -h / /home/runner/work/los | tail -2
+              sleep 30
+            done
+          ) &
+          MONPID=$!
+          trap 'kill "$MONPID" 2>/dev/null || true' EXIT
+
+          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)" || \
+          repo sync -c --no-clone-bundle --no-tags --prune -j4
+
+      - name: Fetch and validate WebView arm64 Git LFS APK
+        working-directory: /home/runner/work/los
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR=external/chromium-webview/prebuilt/arm64
+          if [ -d "$DIR" ]; then
+            git -C "$DIR" lfs pull --include='webview.apk' --exclude=''
+            git -C "$DIR" lfs checkout webview.apk
+          fi
+
+      - name: Verify star2lte product registration
+        working-directory: /home/runner/work/los
+        shell: bash
+        run: |
+          set -eo pipefail
+          MATCHES="$(grep -R -l --include='AndroidProducts.mk' 'aosp_starlte' device vendor 2>/dev/null | head -20 || true)"
+          if [ -z "$MATCHES" ]; then exit 1; fi
+
+      - name: Install compatible reclient 0.57.0 (pinned AOSP)
+        working-directory: /home/runner/work/los
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          PINNED_COMMIT="5148d33653fe6920633e405fd990b525f5bce912"
+          PINNED_VERSION="0.57.0.4865132"
+          DEST="prebuilts/remoteexecution-client/compat-${PINNED_VERSION}"
+          FETCH_DIR="$RUNNER_TEMP/reclient-pinned"
+          mkdir -p "$FETCH_DIR" "$DEST"
+          git -C "$FETCH_DIR" init -q
+          git -C "$FETCH_DIR" remote add origin https://android.googlesource.com/platform/prebuilts/remoteexecution-client
+          git -C "$FETCH_DIR" config core.sparseCheckout true
+          printf '%s\n' "/${PINNED_VERSION}/" > "$FETCH_DIR/.git/info/sparse-checkout"
+          git -C "$FETCH_DIR" -c protocol.version=2 fetch --depth=1 --filter=blob:none origin "$PINNED_COMMIT"
+          git -C "$FETCH_DIR" checkout -q --detach FETCH_HEAD
+          cp -r "$FETCH_DIR/$PINNED_VERSION/." "$DEST/"
+          echo "RBE_DIR=$DEST" >> "$GITHUB_ENV"
+
+      - name: Start authenticated BuildBuddy gRPC bridge
+        working-directory: /home/runner/work/los
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRIDGE_DIR="/tmp/buildbuddy-rbe-bridge"
+          install -d -m 700 "$BRIDGE_DIR" /tmp/rbe-test
+          python3 - <<'PYBRIDGE'
+          import os
+          from pathlib import Path
+          secret = os.environ['BUILDBUDDY_API_KEY']
+          encoded = secret.replace('\\', '\\\\').replace('"', '\\"')
+          config = '''worker_processes 1;
+          pid /tmp/buildbuddy-rbe-bridge/nginx.pid;
+          events { worker_connections 1024; }
+          http {
+            access_log off;
+            server {
+              listen 127.0.0.1:19099 http2;
+              location / {
+                grpc_pass grpcs://remote.buildbuddy.io:443;
+                grpc_ssl_server_name on;
+                grpc_ssl_name remote.buildbuddy.io;
+                grpc_ssl_verify on;
+                grpc_ssl_verify_depth 5;
+                grpc_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+                grpc_set_header x-buildbuddy-api-key "__BUILDBUDDY_KEY__";
+              }
+            }
+          }
+          '''.replace('__BUILDBUDDY_KEY__', encoded)
+          Path('/tmp/buildbuddy-rbe-bridge/nginx.conf').write_text(config)
+          PYBRIDGE
+          nginx -c "$BRIDGE_DIR/nginx.conf"
+          sleep 2
+
+      - name: Configure Lineage and build full star2lte ROM via BuildBuddy
+        working-directory: /home/runner/work/los
+        timeout-minutes: 325
+        shell: bash
+        run: |
+          set -eo pipefail
+          mkdir -p /tmp/rbe-test
+
+          # Hàm In thông tin tài nguyên hệ thống
+          log_resources() {
+            echo "========================================================"
+            echo " TÀI NGUYÊN HỆ THỐNG: $1 ($(date -u +'%H:%M:%S UTC'))"
+            echo "========================================================"
+            echo "[DISK]"
+            df -h / /home/runner/work/los 2>/dev/null || true
+            echo "[RAM & SWAP]"
+            free -h || true
+            swapon --show || true
+            echo "========================================================"
+          }
+
+          log_resources "Khởi tạo môi trường (Envsetup & Lunch)"
+
+          source build/envsetup.sh
+          lunch aosp_starlte-userdebug
+
+          if [ -x "$PWD/prebuilts/jdk/jdk11/linux-x86/bin/java" ]; then
+            export JAVA_HOME="$PWD/prebuilts/jdk/jdk11/linux-x86"
+            export PATH="$JAVA_HOME/bin:$PATH"
+          fi
+          export USE_CCACHE=0
+          export CCACHE_DISABLE=1
+          export RBE_exec_root="$(dirname "$(pwd -P)")"
+
+          DISK_SAMPLES=/tmp/rbe-test/resource-samples.tsv
+          disk_sample() {
+            local available="$(df -B1 --output=avail / | tail -n 1 | tr -d ' ')"
+            printf '%s\n' "$available"
+          }
+          enforce_initial_disk_guard() {
+            local available="$(disk_sample "$1")"
+            if (( available < DISK_STOP_GIB * 1024 * 1024 * 1024 )); then exit 1; fi
+          }
+
+          # Bổ sung prebuilt kernel bị thiếu cho microdroid
+          if [ ! -d "kernel/prebuilts/common-modules/virtual-device/5.10/arm64" ]; then
+            echo "=== CLONING MISSING MICRODROID PREBUILTS ==="
+            git clone https://android.googlesource.com/kernel/prebuilts/common-modules/virtual-device/5.10/arm64 \
+              kernel/prebuilts/common-modules/virtual-device/5.10/arm64 --depth=1
+          fi
+
+          # Sửa lỗi RBE scandeps do thiếu tệp CFI của Clang 12
+          echo "=== FIX RBE CLANG SCAN BUG ==="
+          MISSING_CFI_DIR="prebuilts/clang/host/linux-x86/clang-r416183b1/lib64/clang/12.0.7/share"
+          mkdir -p "$MISSING_CFI_DIR"
+          touch "$MISSING_CFI_DIR/cfi_ignorelist.txt"
+
+          enforce_initial_disk_guard pre-graph
+          log_resources "Trước khi tạo đồ thị Soong (build-graph)"
+
+          echo "=== GENERATE BUILD GRAPH ==="
+          m nothing 2>&1 | tee /tmp/rbe-test/m-nothing.log
+          enforce_initial_disk_guard post-graph
+          
+          log_resources "Sau khi Soong hoàn tất"
+
+          BUILD_NINJA="$(find "$ANDROID_BUILD_TOP/out" -maxdepth 1 -name 'combined*.ninja' | head -1)"
+          echo "BUILD_NINJA=$BUILD_NINJA" > /tmp/rbe-test/build-ninja.txt
+
+          echo "=== XÓA THƯ MỤC .repo ĐỂ GIẢI PHÓNG ĐĨA CHO PHA ĐÓNG GÓI 99% ==="
+          # Giả mạo công cụ repo để bypass lỗi tạo build-manifest.xml
+          rm -f /home/runner/work/los/.repo/repo/repo || true
+          cat << 'EOF' > /home/runner/work/los/.repo/repo/repo
+          #!/usr/bin/env python3
+          print('<?xml version="1.0" encoding="UTF-8"?><manifest></manifest>')
+          EOF
+          chmod +x /home/runner/work/los/.repo/repo/repo
+
+          rm -rf /home/runner/work/los/.repo/project-objects || true
+          rm -rf /home/runner/work/los/.repo/projects || true
+          rm -rf /home/runner/work/los/.repo/manifests || true
+
+          log_resources "Sau khi dọn dẹp .repo (Chuẩn bị Build ROM)"
+
+          BUILD_LOG=/tmp/rbe-test/full-rom-build.log
+          BUILD_STATUS_FILE=/tmp/rbe-test/build-exit-code.txt
+          DISK_TRIP_FILE=/tmp/rbe-test/disk-stop-triggered.txt
+          TIME_TRIP_FILE=/tmp/rbe-test/time-stop-triggered.txt
+          rm -f "$BUILD_STATUS_FILE" "$DISK_TRIP_FILE" "$TIME_TRIP_FILE"
+
+          if [ -s /tmp/rbe-test/job-start-epoch.txt ]; then
+            JOB_START_EPOCH="$(cat /tmp/rbe-test/job-start-epoch.txt)"
+          else
+            JOB_START_EPOCH="$(date +%s)"
+          fi
+          SOFT_DEADLINE_EPOCH=$(( JOB_START_EPOCH + FULL_ROM_SOFT_DEADLINE_MINUTES * 60 ))
+
+          # Tiến trình dọn dẹp chạy ngầm
+          (
+            while true; do
+              # Xóa thư mục symbols để tiết kiệm đĩa
+              # Xóa các file log reproxy rác để chống phình đĩa
+              rm -f /tmp/rbe-test/*.rrpl /tmp/rbe-test/*.INFO* 2>/dev/null || true
+              sleep 60
+            done
+          ) &
+          SYMBOL_KILLER_PID=$!
+
+          (
+            set +e
+            set -o pipefail
+            
+            # Tắt Unit Tests ngốn RAM và ép GC dọn rác bộ nhớ
+            export SKIP_SOONG_TESTS=true
+            export GOGC=45
+            
+            # Tắt PGO để tránh lỗi upload file quá lớn lên BuildBuddy (HTTP 413)
+            export ANDROID_PGO_NO_PROFILE_USE=true
+            export SKIP_ABI_CHECKS=true
+            
+            m -j3 bacon 2>&1 | tee "$BUILD_LOG"
+            rc=${PIPESTATUS[0]}
+            printf '%s\n' "$rc" > "$BUILD_STATUS_FILE"
+            exit "$rc"
+          ) &
+          BUILD_PID=$!
+
+          stop_process_tree() {
+            local pid="$1" child
+            while IFS= read -r child; do
+              [ -n "$child" ] || continue
+              stop_process_tree "$child"
+            done < <(pgrep -P "$pid" 2>/dev/null || true)
+            kill -TERM "$pid" 2>/dev/null || true
+          }
+          cleanup_build_supervisor() {
+            kill $SYMBOL_KILLER_PID 2>/dev/null || true
+            if kill -0 "$BUILD_PID" 2>/dev/null; then
+              stop_process_tree "$BUILD_PID"
+            fi
+          }
+          trap cleanup_build_supervisor EXIT
+
+          : > /tmp/rbe-test/resource-monitor.log
+          while kill -0 "$BUILD_PID" 2>/dev/null; do
+            avail="$(disk_sample full-rom-sample)"
+            now="$(date +%s)"
+            if (( avail < DISK_STOP_GIB * 1073741824 )); then
+              echo "Root disk safety stop" > "$DISK_TRIP_FILE"
+              stop_process_tree "$BUILD_PID"
+              break
+            fi
+            if (( now >= SOFT_DEADLINE_EPOCH )); then
+              echo "Time safety stop" > "$TIME_TRIP_FILE"
+              stop_process_tree "$BUILD_PID"
+              break
+            fi
+            sleep 30
+          done
+
+          set +e
+          wait "$BUILD_PID"
+          WAIT_RC=$?
+          set -e
+          trap - EXIT
+          BUILD_RC="$WAIT_RC"
+          if [ -s "$BUILD_STATUS_FILE" ]; then BUILD_RC="$(cat "$BUILD_STATUS_FILE")"; fi
+          if [ -s "$DISK_TRIP_FILE" ]; then BUILD_RC=70; fi
+          if [ -s "$TIME_TRIP_FILE" ]; then BUILD_RC=71; fi
+
+          log_resources "Hoàn tất Build ROM (Exit: $BUILD_RC)"
+
+          if [ "$BUILD_RC" -ne 0 ]; then
+            tail -n 120 "$BUILD_LOG" || true
+            exit "$BUILD_RC"
+          fi
+
+          ROM_DIR="$ANDROID_BUILD_TOP/out/target/product/starlte"
+          ROM_ZIP="$(find "$ROM_DIR" -maxdepth 1 -type f -name 'lineage-*.zip' | head -1)"
+          if [ -z "$ROM_ZIP" ]; then exit 1; fi
+          sha256sum "$ROM_ZIP" > /tmp/rbe-test/rom-sha256.txt
+
+      - name: Upload completed LineageOS ROM
+        if: ${{ success() && inputs.run_mode == 'full_rom' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-19.1-starlte-${{ github.run_id }}
+          path: /home/runner/work/los/out/target/product/starlte/lineage-*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Stop BuildBuddy gRPC bridge and remove credentials
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          CFG="/tmp/buildbuddy-rbe-bridge/nginx.conf"
+          if [ -f "$CFG" ]; then nginx -s quit -c "$CFG" >/dev/null 2>&1 || true; fi
+          rm -rf /tmp/buildbuddy-rbe-bridge
+
+      - name: Redact BuildBuddy API key from RBE artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          python3 - <<'PYREDACT'
+          import os
+          from pathlib import Path
+          key = os.environ.get("BUILDBUDDY_API_KEY", "").encode()
+          root = Path("/tmp/rbe-test")
+          if key and root.is_dir():
+              for file in root.rglob("*"):
+                  if not file.is_file() or file.is_symlink(): continue
+                  data = file.read_bytes()
+                  if key in data:
+                      file.write_bytes(data.replace(key, b"*" * len(key)))
+          PYREDACT
+
+      - name: Upload full ROM trial diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rbe-test-logs-${{ github.run_id }}
+          path: /tmp/rbe-test
+          if-no-files-found: warn
+          retention-days: 7
