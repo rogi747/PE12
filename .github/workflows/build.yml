@@ -37,7 +37,7 @@ jobs:
       RUN_MODE: "${{ inputs.run_mode }}"
       OUT_STORAGE: "${{ inputs.out_storage }}"
 
-      # BẬT LẠI RBE
+      # CẤU HÌNH RBE
       USE_RBE: "1"
       RBE_DIR: "prebuilts/remoteexecution-client/live"
       RBE_CXX_EXEC_STRATEGY: "remote_local_fallback"
@@ -47,7 +47,7 @@ jobs:
       RBE_use_application_default_credentials: "false"
       RBE_use_rpc_credentials: "false"
 
-      # ÉP RBE KHÔNG LƯU LOG ĐỂ CỨU Ổ CỨNG
+      # ÉP RBE GIẢM LOG ĐỂ CỨU Ổ CỨNG
       RBE_log_dir: "/tmp/rbe-test"
       RBE_log_path: "text:///tmp/rbe-test/reproxy_log.txt"
       RBE_proxy_log_dir: ""
@@ -128,6 +128,23 @@ jobs:
           chmod a+x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
+      - name: Install legacy ncurses5 for RenderScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION='6.3-2ubuntu0.3'
+          BASE='https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses'
+          DIR='/tmp/android-ncurses5'
+          mkdir -p "$DIR" && cd "$DIR"
+          
+          curl -fLSs --retry 4 "$BASE/libtinfo5_${VERSION}_amd64.deb" -o libtinfo5.deb
+          curl -fLSs --retry 4 "$BASE/libncurses5_${VERSION}_amd64.deb" -o libncurses5.deb
+          
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./libtinfo5.deb ./libncurses5.deb
+          sudo ldconfig
+          
+          rm -rf "$DIR"
+
       - name: Prepare Btrfs ZSTD compressed Android workspace
         working-directory: /home/runner/work
         shell: bash
@@ -138,7 +155,6 @@ jobs:
           mkdir -p /tmp/rbe-test "$WORKSPACE"
           truncate -s "${BTRFS_WORKSPACE_IMAGE_GIB}G" "$BACKING"
           sudo mkfs.btrfs -f -m single -d single "$BACKING"
-          # Ép nén BTRFS cấp độ 3 để mã nguồn nhỏ gọn nhất có thể
           sudo mount -t btrfs -o loop,compress-force=zstd:3,noatime,space_cache=v2 "$BACKING" "$WORKSPACE"
           sudo chown "$(id -u):$(id -g)" "$WORKSPACE"
 
@@ -217,10 +233,11 @@ jobs:
 
       - name: Configure PixelExperience and build full star2lte ROM
         working-directory: /home/runner/work/pe
-        timeout-minutes: 325
+        timeout-minutes: 335
         shell: bash
         run: |
           set -eo pipefail
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
 
           source build/envsetup.sh
           lunch aosp_starlte-userdebug
@@ -242,7 +259,6 @@ jobs:
           m nothing 2>&1 | tee /tmp/rbe-test/m-nothing.log
 
           echo "=== XÓA SẠCH DỮ LIỆU .repo VÀ .git CỦA PREBUILTS ĐỂ CỨU Ổ CỨNG ==="
-          # Giả lập repo tool
           rm -f /home/runner/work/pe/.repo/repo/repo || true
           cat << 'EOF' > /home/runner/work/pe/.repo/repo/repo
           #!/usr/bin/env python3
@@ -250,12 +266,9 @@ jobs:
           EOF
           chmod +x /home/runner/work/pe/.repo/repo/repo
 
-          # Phá hủy .repo (giúp giải phóng ~15GB)
           find /home/runner/work/pe/.repo -mindepth 1 -maxdepth 1 ! -name 'repo' -exec rm -rf {} + || true
-          # Phá hủy lịch sử Git của Toolchain (giúp giải phóng ~3GB)
           find prebuilts external/chromium-webview -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true
 
-          # Worker xóa rác RBE chạy ngầm mỗi phút
           (
             while true; do
               rm -f /tmp/rbe-test/*.rrpl /tmp/rbe-test/*.INFO* 2>/dev/null || true
@@ -306,4 +319,40 @@ jobs:
           path: /home/runner/work/pe/out/target/product/starlte/*.zip
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
+
+      - name: Stop BuildBuddy bridge
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          CFG="/tmp/buildbuddy-rbe-bridge/nginx.conf"
+          if [ -f "$CFG" ]; then nginx -s quit -c "$CFG" >/dev/null 2>&1 || true; fi
+          rm -rf /tmp/buildbuddy-rbe-bridge
+
+      - name: Redact API Keys
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          python3 - <<'PYREDACT'
+          import os
+          from pathlib import Path
+          key = os.environ.get("BUILDBUDDY_API_KEY", "").encode()
+          root = Path("/tmp/rbe-test")
+          if key and root.is_dir():
+              for file in root.rglob("*"):
+                  if not file.is_file() or file.is_symlink(): continue
+                  data = file.read_bytes()
+                  if key in data:
+                      file.write_bytes(data.replace(key, b"*" * len(key)))
+          PYREDACT
+
+      - name: Upload full ROM trial diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rbe-test-logs-${{ github.run_id }}
+          path: /tmp/rbe-test
+          if-no-files-found: warn
           retention-days: 7
