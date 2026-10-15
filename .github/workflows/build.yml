@@ -221,7 +221,6 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
 
           source build/envsetup.sh
           lunch aosp_starlte-userdebug
