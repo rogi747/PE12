@@ -1,5 +1,51 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
+   <!-- P0: Avoid syncing the macOS Clang toolchain on Linux build runners. -->
+    <remove-project name="platform/prebuilts/clang/host/darwin-x86" optional="true" />
+    <remove-project name="platform/prebuilts/android-emulator" optional="true" />
+    <remove-project name="platform/prebuilts/bazel/darwin-x86_64" optional="true" />
+    <remove-project name="platform/prebuilts/go/darwin-x86" optional="true" />
+    <remove-project path="prebuilts/fuchsia_sdk" optional="true" />
+    <remove-project path="external/chromium-webview/prebuilt/x86" optional="true" />
+    <remove-project path="external/chromium-webview/prebuilt/x86_64" optional="true" />
+<remove-project name="kernel/prebuilts/5.4/arm64" optional="true" />
+<remove-project name="kernel/prebuilts/5.4/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/5.10/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/5.15/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/6.6/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/mainline/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/4.19/arm64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/4.19/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/5.4/arm64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/5.4/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/5.10/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/5.15/arm64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/5.15/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/6.1/arm64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/6.1/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/6.6/arm64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/6.6/x86-64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/mainline/arm64" optional="true" />
+<remove-project name="kernel/prebuilts/common-modules/virtual-device/mainline/x86-64" optional="true" />
+<remove-project name="kernel/tests" optional="true" />
+ <remove-project name="device/common" optional="true" />
+<remove-project name="device/generic/arm64" optional="true" />
+<remove-project name="device/generic/armv7-a-neon" optional="true" />
+<remove-project name="device/generic/art" optional="true" />
+<remove-project name="device/generic/car" optional="true" />
+<remove-project name="LineageOS/android_device_generic_common" optional="true" />
+<remove-project name="device/generic/mini-emulator-arm64" optional="true" />
+<remove-project name="device/generic/mini-emulator-armv7-a-neon" optional="true" />
+<remove-project name="device/generic/mini-emulator-x86" optional="true" />
+<remove-project name="device/generic/mini-emulator-x86_64" optional="true" />
+<remove-project name="device/generic/trusty" optional="true" />
+<remove-project name="device/generic/uml" optional="true" />
+<remove-project name="device/generic/x86" optional="true" />
+<remove-project name="device/generic/x86_64" optional="true" />
+<remove-project name="device/google_car" optional="true" />
+<remove-project name="LineageOS/android_device_google_atv" optional="true" />
+<remove-project name="LineageOS/android_device_google_contexthub" optional="true" />
+<remove-project name="device/google/vrservices" optional="true" /> 
   <!--Device tree-->
   <project name="universal9810/android_device_samsung_starlte" path="device/samsung/starlte" revision="twelve-plus" remote="github"/>
   <project name="universal9810/android_device_samsung_exynos9810-common" path="device/samsung/exynos9810-common" revision="twelve-plus" remote="github"/>
