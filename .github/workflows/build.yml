@@ -37,21 +37,23 @@ jobs:
       RUN_MODE: "${{ inputs.run_mode }}"
       OUT_STORAGE: "${{ inputs.out_storage }}"
 
+      # BẬT LẠI RBE
       USE_RBE: "1"
       RBE_DIR: "prebuilts/remoteexecution-client/live"
       RBE_CXX_EXEC_STRATEGY: "remote_local_fallback"
-
       RBE_service: "127.0.0.1:19099"
       RBE_service_no_security: "true"
       RBE_service_no_auth: "true"
       RBE_use_application_default_credentials: "false"
       RBE_use_rpc_credentials: "false"
 
+      # ÉP RBE KHÔNG LƯU LOG ĐỂ CỨU Ổ CỨNG
       RBE_log_dir: "/tmp/rbe-test"
       RBE_log_path: "text:///tmp/rbe-test/reproxy_log.txt"
       RBE_proxy_log_dir: ""
       RBE_reproxy_wait_seconds: "30"
       RBE_v: "0"
+      RBE_log_format: "reduced"
 
       NINJA_REMOTE_NUM_JOBS: "16"
       NINJA_HIGHMEM_NUM_JOBS: "1"
@@ -59,7 +61,7 @@ jobs:
       DISK_WARN_GIB: "15"
       DISK_STOP_GIB: "1"
       BTRFS_WORKSPACE_IMAGE_GIB: "220"
-      FULL_ROM_SOFT_DEADLINE_MINUTES: "360"
+      FULL_ROM_SOFT_DEADLINE_MINUTES: "350"
 
     steps:
       - name: Reclaim root disk & Setup Swap
@@ -67,26 +69,32 @@ jobs:
         run: |
           set -e
           
-          # Dọn dẹp ổ cứng vật lý tối đa
+          echo "=== DỌN SẠCH CÁC PHẦN MỀM GITHUB RUNNER ĐỂ CỨU DISK ==="
           sudo rm -rf \
             /usr/local/lib/android \
             /usr/share/dotnet \
             /opt/ghc \
             /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache \
             /usr/local/share/boost \
             /usr/share/swift \
             /usr/local/share/powershell \
             /usr/local/lib/node_modules \
             /usr/local/graalvm \
             /usr/share/rust \
-            /usr/share/php* || true
+            /usr/share/php* \
+            /usr/local/share/vcpkg \
+            /usr/local/go \
+            /opt/google/chrome \
+            /opt/microsoft/msedge \
+            /usr/share/miniconda \
+            /usr/local/aws-cli \
+            /usr/local/bin/aws* || true
+            
           sudo docker image prune -a -f >/dev/null 2>&1 || true
-          sudo rm -rf /usr/local/swift /opt/swift /usr/local/share/powershell \
-            /opt/julia /usr/local/julia || true
+          sudo apt-get clean
 
-          # CẤP PHÁT 8GB SWAP ĐỂ CHỐNG LỖI OOM KHI SOONG BUILD
-          echo "=== CẤP PHÁT 8GB SWAP VÀO RAM ==="
+          echo "=== CẤP PHÁT 8GB SWAP ==="
           sudo fallocate -l 8G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
@@ -94,21 +102,7 @@ jobs:
 
           mkdir -p /home/runner/work/pe /tmp/rbe-test
           date +%s > /tmp/rbe-test/job-start-epoch.txt
-
-          echo "=== DISK ==="
           df -h /
-          echo "=== MEMORY ==="
-          free -h
-          echo "=== CPU ==="
-          nproc
-
-          TS=/tmp/rbe-test/resource-samples.tsv
-          printf 'timestamp\tstage\tdisk_available_bytes\tdisk_used_bytes\tmem_available_kib\n' > "$TS"
-          printf '%s\tpost-reclaim\t%s\t%s\t%s\n' \
-            "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            "$(df -B1 --output=avail / | tail -n1 | tr -d ' ')" \
-            "$(df -B1 --output=used / | tail -n1 | tr -d ' ')" \
-            "$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)" >> "$TS"
 
       - name: Checkout local manifest
         uses: actions/checkout@v4
@@ -120,7 +114,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bc bison build-essential curl flex g++-multilib gcc-multilib git \
             git-lfs gnupg gperf imagemagick lib32readline-dev lib32z1-dev \
@@ -134,24 +128,7 @@ jobs:
           chmod a+x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Install legacy ncurses5 for Android 11/12 RenderScript
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION='6.3-2ubuntu0.3'
-          BASE='https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses'
-          DIR='/tmp/android11-ncurses5'
-          mkdir -p "$DIR" /tmp/rbe-test
-          cd "$DIR"
-
-          curl -fLSs --retry 4 --retry-delay 2 "$BASE/libtinfo5_${VERSION}_amd64.deb" -o "libtinfo5_${VERSION}_amd64.deb"
-          curl -fLSs --retry 4 --retry-delay 2 "$BASE/libncurses5_${VERSION}_amd64.deb" -o "libncurses5_${VERSION}_amd64.deb"
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "./libtinfo5_${VERSION}_amd64.deb" "./libncurses5_${VERSION}_amd64.deb"
-          sudo ldconfig
-
       - name: Prepare Btrfs ZSTD compressed Android workspace
-        if: ${{ inputs.run_mode == 'full_rom' && inputs.out_storage == 'btrfs_zstd' }}
         working-directory: /home/runner/work
         shell: bash
         run: |
@@ -160,64 +137,31 @@ jobs:
           BACKING=/tmp/pe-workspace-btrfs.img
           mkdir -p /tmp/rbe-test "$WORKSPACE"
           truncate -s "${BTRFS_WORKSPACE_IMAGE_GIB}G" "$BACKING"
-          sudo mkfs.btrfs -f -m single -d single "$BACKING" > /tmp/rbe-test/workspace-btrfs-setup.log 2>&1
-          sudo mount -t btrfs -o loop,compress=zstd:1,noatime "$BACKING" "$WORKSPACE"
+          sudo mkfs.btrfs -f -m single -d single "$BACKING"
+          # Ép nén BTRFS cấp độ 3 để mã nguồn nhỏ gọn nhất có thể
+          sudo mount -t btrfs -o loop,compress-force=zstd:3,noatime,space_cache=v2 "$BACKING" "$WORKSPACE"
           sudo chown "$(id -u):$(id -g)" "$WORKSPACE"
-          printf 'timestamp\tstage\troot_available_bytes\troot_used_bytes\tbtrfs_available_bytes\tbtrfs_used_bytes\tbacking_allocated_bytes\tbacking_apparent_bytes\n' \
-            > /tmp/rbe-test/btrfs-storage-samples.tsv
 
-      - name: Repo init and install local manifest
-        working-directory: /home/runner/work/pe
-        shell: bash
-        run: |
-          set -e
-          git config --global user.email "ci@local"
-          git config --global user.name "ci"
-          git config --global color.ui false
-          git lfs version
-          git lfs install --skip-repo
-
-          mkdir -p /home/runner/work/pe
-          cd /home/runner/work/pe
-
-          # Đổi sang manifest của PixelExperience 12
-          repo init --depth=1 --git-lfs -u https://github.com/PE12-Legacy/manifest -b twelve-plus
-          mkdir -p .repo/local_manifests
-          cp "$GITHUB_WORKSPACE/repo-config/.repo-local-manifests/star2lte.xml" ".repo/local_manifests/star2lte.xml"
-
-      - name: Repo sync
+      - name: Repo init and sync
         working-directory: /home/runner/work/pe
         timeout-minutes: 120
         shell: bash
         run: |
           set -eo pipefail
-          (
-            while true; do
-              df -h / /home/runner/work/pe | tail -2
-              sleep 30
-            done
-          ) &
-          MONPID=$!
-          trap 'kill "$MONPID" 2>/dev/null || true' EXIT
+          git config --global user.email "ci@local"
+          git config --global user.name "ci"
+          git config --global color.ui false
+          git lfs install --skip-repo
+
+          repo init --depth=1 --git-lfs -u https://github.com/PE12-Legacy/manifest -b twelve-plus
+          mkdir -p .repo/local_manifests
+          cp "$GITHUB_WORKSPACE/repo-config/.repo-local-manifests/star2lte.xml" ".repo/local_manifests/star2lte.xml"
 
           repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)" || \
           repo sync -c --no-clone-bundle --no-tags --prune -j4
 
-      - name: Verify star2lte product registration
-        working-directory: /home/runner/work/pe
-        shell: bash
-        run: |
-          set -eo pipefail
-          # PixelExperience thường dùng aosp_ thay vì lineage_
-          MATCHES="$(grep -R -l --include='AndroidProducts.mk' 'aosp_starlte' device vendor 2>/dev/null | head -20 || true)"
-          if [ -z "$MATCHES" ]; then 
-            echo "Cảnh báo: Không tìm thấy khai báo aosp_starlte trong AndroidProducts.mk!"
-            # exit 1 (Nếu cần thiết có thể bật chặn tại đây)
-          fi
-
       - name: Install compatible reclient 0.57.0 (pinned AOSP)
         working-directory: /home/runner/work/pe
-        timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
@@ -235,7 +179,7 @@ jobs:
           cp -r "$FETCH_DIR/$PINNED_VERSION/." "$DEST/"
           echo "RBE_DIR=$DEST" >> "$GITHUB_ENV"
 
-      - name: Start authenticated BuildBuddy gRPC bridge
+      - name: Start BuildBuddy bridge
         working-directory: /home/runner/work/pe
         shell: bash
         run: |
@@ -273,28 +217,13 @@ jobs:
 
       - name: Configure PixelExperience and build full star2lte ROM
         working-directory: /home/runner/work/pe
-        timeout-minutes: 335
+        timeout-minutes: 325
         shell: bash
         run: |
           set -eo pipefail
-          mkdir -p /tmp/rbe-test
-
-          log_resources() {
-            echo "========================================================"
-            echo " TÀI NGUYÊN HỆ THỐNG: $1 ($(date -u +'%H:%M:%S UTC'))"
-            echo "========================================================"
-            echo "[DISK]"
-            df -h / /home/runner/work/pe 2>/dev/null || true
-            echo "[RAM & SWAP]"
-            free -h || true
-            swapon --show || true
-            echo "========================================================"
-          }
-
-          log_resources "Khởi tạo môi trường (Envsetup & Lunch)"
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
 
           source build/envsetup.sh
-          # PixelExperience sử dụng aosp_starlte
           lunch aosp_starlte-userdebug
 
           if [ -x "$PWD/prebuilts/jdk/jdk11/linux-x86/bin/java" ]; then
@@ -305,40 +234,16 @@ jobs:
           export CCACHE_DISABLE=1
           export RBE_exec_root="$(dirname "$(pwd -P)")"
 
-          DISK_SAMPLES=/tmp/rbe-test/resource-samples.tsv
-          disk_sample() {
-            local available="$(df -B1 --output=avail / | tail -n 1 | tr -d ' ')"
-            printf '%s\n' "$available"
-          }
-          enforce_initial_disk_guard() {
-            local available="$(disk_sample "$1")"
-            if (( available < DISK_STOP_GIB * 1024 * 1024 * 1024 )); then exit 1; fi
-          }
-
           if [ ! -d "kernel/prebuilts/common-modules/virtual-device/5.10/arm64" ]; then
-            echo "=== CLONING MISSING MICRODROID PREBUILTS ==="
             git clone https://android.googlesource.com/kernel/prebuilts/common-modules/virtual-device/5.10/arm64 \
               kernel/prebuilts/common-modules/virtual-device/5.10/arm64 --depth=1
           fi
 
-          echo "=== FIX RBE CLANG SCAN BUG ==="
-          MISSING_CFI_DIR="prebuilts/clang/host/linux-x86/clang-r416183b1/lib64/clang/12.0.7/share"
-          mkdir -p "$MISSING_CFI_DIR"
-          touch "$MISSING_CFI_DIR/cfi_ignorelist.txt"
-
-          enforce_initial_disk_guard pre-graph
-          log_resources "Trước khi tạo đồ thị Soong (build-graph)"
-
-          echo "=== GENERATE BUILD GRAPH ==="
+          echo "=== TẠO ĐỒ THỊ SOONG ==="
           m nothing 2>&1 | tee /tmp/rbe-test/m-nothing.log
-          enforce_initial_disk_guard post-graph
-          
-          log_resources "Sau khi Soong hoàn tất"
 
-          BUILD_NINJA="$(find "$ANDROID_BUILD_TOP/out" -maxdepth 1 -name 'combined*.ninja' | head -1)"
-          echo "BUILD_NINJA=$BUILD_NINJA" > /tmp/rbe-test/build-ninja.txt
-
-          echo "=== XÓA THƯ MỤC .repo ĐỂ GIẢI PHÓNG ĐĨA ==="
+          echo "=== XÓA SẠCH DỮ LIỆU .repo VÀ .git CỦA PREBUILTS ĐỂ CỨU Ổ CỨNG ==="
+          # Giả lập repo tool
           rm -f /home/runner/work/pe/.repo/repo/repo || true
           cat << 'EOF' > /home/runner/work/pe/.repo/repo/repo
           #!/usr/bin/env python3
@@ -346,25 +251,12 @@ jobs:
           EOF
           chmod +x /home/runner/work/pe/.repo/repo/repo
 
-          rm -rf /home/runner/work/pe/.repo/project-objects || true
-          rm -rf /home/runner/work/pe/.repo/projects || true
-          rm -rf /home/runner/work/pe/.repo/manifests || true
+          # Phá hủy .repo (giúp giải phóng ~15GB)
+          find /home/runner/work/pe/.repo -mindepth 1 -maxdepth 1 ! -name 'repo' -exec rm -rf {} + || true
+          # Phá hủy lịch sử Git của Toolchain (giúp giải phóng ~3GB)
+          find prebuilts external/chromium-webview -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true
 
-          log_resources "Sau khi dọn dẹp .repo (Chuẩn bị Build ROM)"
-
-          BUILD_LOG=/tmp/rbe-test/full-rom-build.log
-          BUILD_STATUS_FILE=/tmp/rbe-test/build-exit-code.txt
-          DISK_TRIP_FILE=/tmp/rbe-test/disk-stop-triggered.txt
-          TIME_TRIP_FILE=/tmp/rbe-test/time-stop-triggered.txt
-          rm -f "$BUILD_STATUS_FILE" "$DISK_TRIP_FILE" "$TIME_TRIP_FILE"
-
-          if [ -s /tmp/rbe-test/job-start-epoch.txt ]; then
-            JOB_START_EPOCH="$(cat /tmp/rbe-test/job-start-epoch.txt)"
-          else
-            JOB_START_EPOCH="$(date +%s)"
-          fi
-          SOFT_DEADLINE_EPOCH=$(( JOB_START_EPOCH + FULL_ROM_SOFT_DEADLINE_MINUTES * 60 ))
-
+          # Worker xóa rác RBE chạy ngầm mỗi phút
           (
             while true; do
               rm -f /tmp/rbe-test/*.rrpl /tmp/rbe-test/*.INFO* 2>/dev/null || true
@@ -373,16 +265,18 @@ jobs:
           ) &
           SYMBOL_KILLER_PID=$!
 
+          BUILD_LOG=/tmp/rbe-test/full-rom-build.log
+          BUILD_STATUS_FILE=/tmp/rbe-test/build-exit-code.txt
+          rm -f "$BUILD_STATUS_FILE"
+
           (
             set +e
             set -o pipefail
-            
             export SKIP_SOONG_TESTS=true
             export GOGC=45
             export ANDROID_PGO_NO_PROFILE_USE=true
             export SKIP_ABI_CHECKS=true
             
-            # PixelExperience có thể build bằng mka bacon hoặc m bacon
             m -j3 bacon 2>&1 | tee "$BUILD_LOG"
             rc=${PIPESTATUS[0]}
             printf '%s\n' "$rc" > "$BUILD_STATUS_FILE"
@@ -390,50 +284,10 @@ jobs:
           ) &
           BUILD_PID=$!
 
-          stop_process_tree() {
-            local pid="$1" child
-            while IFS= read -r child; do
-              [ -n "$child" ] || continue
-              stop_process_tree "$child"
-            done < <(pgrep -P "$pid" 2>/dev/null || true)
-            kill -TERM "$pid" 2>/dev/null || true
-          }
-          cleanup_build_supervisor() {
-            kill $SYMBOL_KILLER_PID 2>/dev/null || true
-            if kill -0 "$BUILD_PID" 2>/dev/null; then
-              stop_process_tree "$BUILD_PID"
-            fi
-          }
-          trap cleanup_build_supervisor EXIT
-
-          : > /tmp/rbe-test/resource-monitor.log
-          while kill -0 "$BUILD_PID" 2>/dev/null; do
-            avail="$(disk_sample full-rom-sample)"
-            now="$(date +%s)"
-            if (( avail < DISK_STOP_GIB * 1073741824 )); then
-              echo "Root disk safety stop" > "$DISK_TRIP_FILE"
-              stop_process_tree "$BUILD_PID"
-              break
-            fi
-            if (( now >= SOFT_DEADLINE_EPOCH )); then
-              echo "Time safety stop" > "$TIME_TRIP_FILE"
-              stop_process_tree "$BUILD_PID"
-              break
-            fi
-            sleep 30
-          done
-
-          set +e
           wait "$BUILD_PID"
-          WAIT_RC=$?
-          set -e
-          trap - EXIT
-          BUILD_RC="$WAIT_RC"
+          BUILD_RC=$?
           if [ -s "$BUILD_STATUS_FILE" ]; then BUILD_RC="$(cat "$BUILD_STATUS_FILE")"; fi
-          if [ -s "$DISK_TRIP_FILE" ]; then BUILD_RC=70; fi
-          if [ -s "$TIME_TRIP_FILE" ]; then BUILD_RC=71; fi
-
-          log_resources "Hoàn tất Build ROM (Exit: $BUILD_RC)"
+          kill $SYMBOL_KILLER_PID 2>/dev/null || true
 
           if [ "$BUILD_RC" -ne 0 ]; then
             tail -n 120 "$BUILD_LOG" || true
@@ -441,11 +295,7 @@ jobs:
           fi
 
           ROM_DIR="$ANDROID_BUILD_TOP/out/target/product/starlte"
-          ROM_ZIP="$(find "$ROM_DIR" -maxdepth 1 -type f -name 'PixelExperience*.zip' | head -1)"
-          if [ -z "$ROM_ZIP" ]; then 
-            # Fallback nếu tên ZIP khác chuẩn
-            ROM_ZIP="$(find "$ROM_DIR" -maxdepth 1 -type f -name '*.zip' | head -1)"
-          fi
+          ROM_ZIP="$(find "$ROM_DIR" -maxdepth 1 -type f -name '*.zip' | head -1)"
           if [ -z "$ROM_ZIP" ]; then exit 1; fi
           sha256sum "$ROM_ZIP" > /tmp/rbe-test/rom-sha256.txt
 
@@ -457,40 +307,4 @@ jobs:
           path: /home/runner/work/pe/out/target/product/starlte/*.zip
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
-
-      - name: Stop BuildBuddy gRPC bridge and remove credentials
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          CFG="/tmp/buildbuddy-rbe-bridge/nginx.conf"
-          if [ -f "$CFG" ]; then nginx -s quit -c "$CFG" >/dev/null 2>&1 || true; fi
-          rm -rf /tmp/buildbuddy-rbe-bridge
-
-      - name: Redact BuildBuddy API key from RBE artifacts
-        if: always()
-        shell: bash
-        run: |
-          set -e
-          python3 - <<'PYREDACT'
-          import os
-          from pathlib import Path
-          key = os.environ.get("BUILDBUDDY_API_KEY", "").encode()
-          root = Path("/tmp/rbe-test")
-          if key and root.is_dir():
-              for file in root.rglob("*"):
-                  if not file.is_file() or file.is_symlink(): continue
-                  data = file.read_bytes()
-                  if key in data:
-                      file.write_bytes(data.replace(key, b"*" * len(key)))
-          PYREDACT
-
-      - name: Upload full ROM trial diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rbe-test-logs-${{ github.run_id }}
-          path: /tmp/rbe-test
-          if-no-files-found: warn
           retention-days: 7
